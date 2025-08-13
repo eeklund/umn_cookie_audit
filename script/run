@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+docker build -t umn-cookie-audit .
+docker run --rm -v "$PWD/data:/data" umn-cookie-audit
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  open data/report.csv
+fi

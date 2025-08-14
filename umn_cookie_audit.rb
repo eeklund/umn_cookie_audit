@@ -15,6 +15,30 @@ end
 COOKIECUTTER_URL = "https://apps.lib.umn.edu/cookiecutter/".freeze
 NO_COOKIES_TEXT = "No cookies were found that are eligible for deletion.".freeze
 
+SUSPECT_PATTERNS = {
+  "_dc_gtm_UA" => "Google Analytics",
+  "_ga" => "Google Analytics",
+  "_hjSessionUser" => "Hotjar"
+}.freeze
+
+SUSPECT_LITERALS = {
+  "_fbp" => "Facebook",
+  "_clck" => "Microsoft Clarity",
+  "_clsk" => "Microsoft Clarity",
+  "_gcl_au" => "Google AdSense",
+  "_gid" => "Google Analytics",
+  "__gsas" => "Google Adsense",
+  "OJSSID" => "Open Journal System",
+  "_scid" => "Snapchat",
+  "_scid_r" => "Snapchat",
+  "_sctr" => "Snapchat",
+  "_ttp" => "TikTok",
+  "_tt_enable_cookie" => "TikTok",
+  "_uetvid" => "Bing Ads",
+  "_uetsid" => "Bing Ads",
+  "UMNOJSSID" => "UMN Open Journal System"
+}.freeze
+
 def browser_path
   if ENV["BROWSER_PATH"] && File.exist?(ENV["BROWSER_PATH"])
     ENV["BROWSER_PATH"]
@@ -60,10 +84,22 @@ def collect_cookies(browser)
   end
 end
 
+def umn_wide_domain?(cookie)
+  domain = cookie["domain"].to_s.downcase
+  domain == "umn.edu" || domain == ".umn.edu"
+end
+
+def suspect_service_for(name)
+  return SUSPECT_LITERALS[name] if SUSPECT_LITERALS.key?(name)
+  SUSPECT_PATTERNS.each do |prefix, service|
+    return service if name.start_with?(prefix)
+  end
+  nil
+end
+
 def offending_cookies(cookies)
   cookies.select do |cookie|
-    domain = cookie["domain"].to_s.downcase
-    domain == "umn.edu" || domain == ".umn.edu"
+    umn_wide_domain?(cookie) && suspect_service_for(cookie["name"])
   end
 end
 
@@ -97,7 +133,7 @@ OptionParser.new do |opts|
   opts.on("--no-verify-cookiecutter", "Skip post-visit CookieCutter verdict check") { options[:verify_cookiecutter] = false }
 end.parse!
 
-sites = File.readlines(options[:input], chomp: true).map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
+sites = File.readlines(options[:input], chomp: true).map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
 
 log "Starting UMN cookie audit for #{sites.size} site#{sites.size == 1 ? '' : 's'}..."
 
@@ -115,9 +151,9 @@ CSV.open(options[:output], "w") do |csv|
     "all_cookies_json"
   ]
 
-  sites.each_with_index do |raw, i|
+  sites.each_with_index do |raw, index|
     url = raw =~ %r{\Ahttps?://}i ? raw : "https://#{raw}"
-    log "Starting: [#{i + 1}/#{sites.size}] #{url}"
+    log "Starting: [#{index + 1}/#{sites.size}] #{url}"
 
     offending = []
     offending_names = []
@@ -130,15 +166,15 @@ CSV.open(options[:output], "w") do |csv|
     begin
       browser = new_browser(headless: options[:headless], timeout: options[:timeout])
       browser.cookies.clear
-
       browser.goto(url)
       sleep options[:delay]
 
       cookies = collect_cookies(browser)
       offending = offending_cookies(cookies)
-      offending_names = offending.map { |c| c["name"] }.uniq.sort
-      offending_sizes = offending.map { |c| "#{c["name"]}:#{c["size"]}" }.join("|")
-      offending_total_size = offending.map { |c| c["size"].to_i }.sum
+      offending_names = offending.map { |cookie| cookie["name"] }.uniq.sort
+      offending_sizes = offending.map { |cookie| "#{cookie["name"]}:#{cookie["size"]}" }
+      offending_total_size = offending.map { |cookie| cookie["size"].to_i }.sum
+
       remediation = remediation_for(offending_names, url)
 
       if options[:verify_cookiecutter]
@@ -178,4 +214,3 @@ CSV.open(options[:output], "w") do |csv|
 end
 
 log "Scan complete. Results written to #{options[:output]}"
-

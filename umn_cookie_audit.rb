@@ -8,6 +8,22 @@ require "ferrum"
 
 $stdout.sync = true
 
+CHECK_ICON = "✅".freeze
+ERROR_ICON = "🚫".freeze
+X_ICON     = "❌".freeze
+
+def check_icon(color:)
+  color ? "\e[32m#{CHECK_ICON}\e[0m" : CHECK_ICON
+end
+
+def error_icon(color:)
+  color ? "\e[31m#{ERROR_ICON}\e[0m" : ERROR_ICON
+end
+
+def x_icon(color:)
+  color ? "\e[31m#{X_ICON}\e[0m" : X_ICON
+end
+
 def log(msg)
   puts "[#{Time.now.utc.iso8601}] #{msg}"
 end
@@ -129,7 +145,8 @@ options = {
   headless: true,
   timeout: 25,
   verify_cookiecutter: true,
-  separator: :newline
+  separator: :newline,
+  color: true
 }
 
 OptionParser.new do |opts|
@@ -143,12 +160,14 @@ OptionParser.new do |opts|
   opts.on("--separator NAME", ["newline", "comma", "pipe"], "Cell joiner: newline (default), comma, pipe") do |value|
     options[:separator] = value.to_sym
   end
-
+  opts.on("--no-color", "Disable ANSI colors in console output") { options[:color] = false }
 end.parse!
 
 sites = File.readlines(options[:input], chomp: true).map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
+total = sites.size
 
-log "Starting UMN cookie audit for #{sites.size} site#{sites.size == 1 ? '' : 's'}..."
+run_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+log "Starting UMN cookie audit for #{total} site#{total == 1 ? '' : 's'}..."
 
 CSV.open(options[:output], "w") do |csv|
   csv << [
@@ -166,7 +185,6 @@ CSV.open(options[:output], "w") do |csv|
 
   sites.each_with_index do |raw, index|
     url = raw =~ %r{\Ahttps?://}i ? raw : "https://#{raw}"
-    log "Starting: [#{index + 1}/#{sites.size}] #{url}"
 
     offending = []
     offending_names = []
@@ -195,6 +213,10 @@ CSV.open(options[:output], "w") do |csv|
         cookiecutter_excerpt = verdict_text[0, 4000]
       end
 
+      icon = offending.any? ? x_icon(color: options[:color]) : check_icon(color: options[:color])
+      status = offending.any? ? "offending=#{offending.size}" : "ok"
+      log "Checked:  [#{index + 1}/#{sites.size}] #{url} #{icon} #{status}"
+
       csv << [
         url,
         offending.any? ? "yes" : "no",
@@ -208,6 +230,7 @@ CSV.open(options[:output], "w") do |csv|
         cookies.to_json
       ]
     rescue => e
+      log "Checked:  [#{index + 1}/#{sites.size}] #{url} #{error_icon(color: options[:color])} error"
       csv << [
         url,
         "error",
@@ -227,3 +250,5 @@ CSV.open(options[:output], "w") do |csv|
 end
 
 log "Scan complete. Results written to #{options[:output]}"
+elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_started
+log "Total runtime: #{format('%.2f', elapsed)}s"

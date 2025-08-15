@@ -52,7 +52,7 @@ def new_browser(headless:, timeout:)
     headless: headless,
     timeout: timeout,
     browser_path: browser_path,
-    browser_options: { 'no-sandbox' => nil, 'disable-dev-shm-usage' => nil }
+    browser_options: { "no-sandbox": nil, "disable-dev-shm-usage": nil }
   )
 end
 

@@ -5,8 +5,10 @@ require "uri"
 require "json"
 require "time"
 require "ferrum"
+require "thread"
 
 $stdout.sync = true
+Thread.abort_on_exception = true
 
 CHECK_ICON = "✅".freeze
 ERROR_ICON = "🚫".freeze
@@ -146,7 +148,8 @@ options = {
   timeout: 25,
   verify_cookiecutter: true,
   separator: :newline,
-  color: true
+  color: true,
+  pool: 4
 }
 
 OptionParser.new do |opts|
@@ -161,6 +164,7 @@ OptionParser.new do |opts|
     options[:separator] = value.to_sym
   end
   opts.on("--no-color", "Disable ANSI colors in console output") { options[:color] = false }
+  opts.on("--pool N", Integer, "Number of parallel workers (default: 4)") { |v| options[:pool] = [v.to_i, 1].max }
 end.parse!
 
 sites = File.readlines(options[:input], chomp: true).map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
@@ -168,6 +172,15 @@ total = sites.size
 
 run_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 log "Starting UMN cookie audit for #{total} site#{total == 1 ? '' : 's'}..."
+
+indexed_sites = sites.each_with_index.map { |raw, index| [raw, index] }
+
+queue = Queue.new
+indexed_sites.each { |item| queue << item }
+
+csv_mutex      = Mutex.new
+progress_mutex = Mutex.new
+completed = 0
 
 CSV.open(options[:output], "w") do |csv|
   csv << [
@@ -183,70 +196,93 @@ CSV.open(options[:output], "w") do |csv|
     "all_cookies_json"
   ]
 
-  sites.each_with_index do |raw, index|
-    url = raw =~ %r{\Ahttps?://}i ? raw : "https://#{raw}"
-
-    offending = []
-    offending_names = []
-    offending_sizes = ""
-    offending_total_size = 0
-    cookiecutter_ok = nil
-    cookiecutter_excerpt = nil
-    remediation = ""
-
-    begin
+  workers = Array.new(options[:pool]) do
+    Thread.new do
       browser = new_browser(headless: options[:headless], timeout: options[:timeout])
-      browser.cookies.clear
-      browser.goto(url)
-      sleep options[:delay]
+      begin
+        loop do
+          raw, index = queue.pop(true) rescue break
+          url = raw =~ %r{\Ahttps?://}i ? raw : "https://#{raw}"
 
-      cookies = collect_cookies(browser)
-      offending = offending_cookies(cookies)
-      offending_names = offending.map { |cookie| cookie["name"] }.uniq.sort
-      offending_sizes = offending.map { |cookie| "#{cookie["name"]}:#{cookie["size"]}" }
-      offending_total_size = offending.map { |cookie| cookie["size"].to_i }.sum
+          offending = []
+          offending_names = []
+          offending_sizes = ""
+          offending_total_size = 0
+          cookiecutter_ok = nil
+          cookiecutter_excerpt = nil
+          remediation = ""
 
-      remediation = remediation_for(offending_names, url)
+          begin
+            browser.cookies.clear
+            browser.goto(url)
+            sleep options[:delay]
 
-      if options[:verify_cookiecutter]
-        cookiecutter_ok, verdict_text = cookiecutter_verdict(browser)
-        cookiecutter_excerpt = verdict_text[0, 4000]
+            cookies = collect_cookies(browser)
+            offending = offending_cookies(cookies)
+            offending_names = offending.map { |cookie| cookie["name"] }.uniq.sort
+            offending_sizes = offending.map { |cookie| "#{cookie["name"]}:#{cookie["size"]}" }
+            offending_total_size = offending.map { |cookie| cookie["size"].to_i }.sum
+
+            remediation = remediation_for(offending_names, url)
+
+            if options[:verify_cookiecutter]
+              cookiecutter_ok, verdict_text = cookiecutter_verdict(browser)
+              cookiecutter_excerpt = verdict_text[0, 4000]
+            end
+
+            icon = offending.any? ? x_icon(color: options[:color]) : check_icon(color: options[:color])
+            status = offending.any? ? "offending=#{offending.size}" : "ok"
+
+            row = [
+              url,
+              offending.any? ? "yes" : "no",
+              offending.size,
+              join_values(offending_names, options[:separator]),
+              join_values(offending_sizes, options[:separator]),
+              offending_total_size,
+              cookiecutter_ok.nil? ? "" : (cookiecutter_ok ? "true" : "false"),
+              cookiecutter_excerpt.to_s,
+              remediation,
+              cookies.to_json
+            ]
+
+            csv_mutex.synchronize do
+              csv << row
+            end
+
+            progress_mutex.synchronize do
+              completed += 1
+              log "Checked:  (#{completed}/#{total}) #{url} #{icon} #{status}"
+            end
+          rescue => e
+            csv_mutex.synchronize do
+              csv << [
+                url,
+                "error",
+                0,
+                "",
+                "",
+                0,
+                "",
+                "",
+                "",
+                { error: e.class.to_s, message: e.message }.to_json
+              ]
+            end
+
+            progress_mutex.synchronize do
+              completed += 1
+              log "Checked:  (#{completed}/#{total}) #{url} #{x_icon(color: options[:color])} error"
+            end
+          end
+        end
+      ensure
+        browser&.quit
       end
-
-      icon = offending.any? ? x_icon(color: options[:color]) : check_icon(color: options[:color])
-      status = offending.any? ? "offending=#{offending.size}" : "ok"
-      log "Checked:  [#{index + 1}/#{sites.size}] #{url} #{icon} #{status}"
-
-      csv << [
-        url,
-        offending.any? ? "yes" : "no",
-        offending.size,
-        join_values(offending_names, options[:separator]),
-        join_values(offending_sizes, options[:separator]),
-        offending_total_size,
-        cookiecutter_ok.nil? ? "" : (cookiecutter_ok ? "true" : "false"),
-        cookiecutter_excerpt.to_s,
-        remediation,
-        cookies.to_json
-      ]
-    rescue => e
-      log "Checked:  [#{index + 1}/#{sites.size}] #{url} #{error_icon(color: options[:color])} error"
-      csv << [
-        url,
-        "error",
-        0,
-        "",
-        "",
-        0,
-        "",
-        "",
-        "",
-        { error: e.class.to_s, message: e.message }.to_json
-      ]
-    ensure
-      browser&.quit
     end
   end
+
+  workers.each(&:join)
 end
 
 log "Scan complete. Results written to #{options[:output]}"

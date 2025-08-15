@@ -114,13 +114,22 @@ def remediation_for(offending_names, url)
   end
 end
 
+def join_values(values, separator)
+  case separator
+  when :comma then values.join(", ")
+  when :pipe then values.join("|")
+  else values.join("\n")
+  end
+end
+
 options = {
   input: "/data/sites.txt",
   output: "/data/report.csv",
   delay: 4,
   headless: true,
   timeout: 25,
-  verify_cookiecutter: true
+  verify_cookiecutter: true,
+  separator: :newline
 }
 
 OptionParser.new do |opts|
@@ -131,6 +140,10 @@ OptionParser.new do |opts|
   opts.on("--timeout SECONDS", Integer, "Navigation timeout") { |v| options[:timeout] = v }
   opts.on("--headful", "Run with a visible window") { options[:headless] = false }
   opts.on("--no-verify-cookiecutter", "Skip post-visit CookieCutter verdict check") { options[:verify_cookiecutter] = false }
+  opts.on("--separator NAME", ["newline", "comma", "pipe"], "Cell joiner: newline (default), comma, pipe") do |value|
+    options[:separator] = value.to_sym
+  end
+
 end.parse!
 
 sites = File.readlines(options[:input], chomp: true).map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
@@ -186,8 +199,8 @@ CSV.open(options[:output], "w") do |csv|
         url,
         offending.any? ? "yes" : "no",
         offending.size,
-        offending_names.join("|"),
-        offending_sizes,
+        join_values(offending_names, options[:separator]),
+        join_values(offending_sizes, options[:separator]),
         offending_total_size,
         cookiecutter_ok.nil? ? "" : (cookiecutter_ok ? "true" : "false"),
         cookiecutter_excerpt.to_s,

@@ -7,9 +7,16 @@ owners.
 
 ## Why this exists
 
-UMN guidance recommends scoping analytics cookies to each subdomain rather than
-the parent `.umn.edu` domain to avoid issues like inflated headers and 431
-errors. This tool automates detection across many sites at once.
+Many `*.umn.edu` sites still set analytics/tracking cookies at the root `.umn.edu`
+domain. That means those cookies are sent to unrelated subdomains, inflating
+request headers and triggering HTTP 431 “Request Header Fields Too Large” errors.
+UMN guidance is to scope cookies to each subdomain. This tool automates detection
+at scale so teams can quickly prioritize and verify fixes.
+
+This project grew out of a U of M Tech People Co-working discussion: despite
+several communications, mis-scoped cookies persist and users still hit 431s.
+The scanner provides a fast, repeatable way to find problems across many sites
+and confirm remediation (e.g., GA/GTM `cookie_domain` updates).
 
 ## What it does
 
@@ -17,7 +24,8 @@ For each site in `data/sites.txt`, the tool:
 
 1. Launches a clean, headless Chromium session inside Docker.
 2. Loads the site and waits briefly for tags to set cookies.
-3. Records all cookies and flags those scoped to `umn.edu` or `.umn.edu`.
+3. Records all cookies and flags those scoped to `umn.edu` or `.umn.edu` using
+   the same suspect lists as the [U of M Library's CookieCutter code](https://github.umn.edu/Libraries/cookie-cutter).
 4. Optionally checks the CookieCutter page to capture its verdict.
 5. Writes results to `data/report.csv`.
 
@@ -33,6 +41,16 @@ For each site in `data/sites.txt`, the tool:
 - `cookiecutter_excerpt`
 - `remediation`
 - `all_cookies_json`
+
+## Console output
+
+The script prints a single line per site as it finishes, plus a start/finish line:
+
+- ✅ **ok** — no offending cookies detected
+- ❌ **offending=N** — N offending cookies detected
+- 🚫 **error** — navigation or evaluation error for the site
+
+ANSI colors are enabled by default; use `--no-color` to disable.
 
 ## Dependencies
 
@@ -95,24 +113,29 @@ docker run --rm -v "$PWD/data:/data" umn-cookie-audit
 You can pass flags to the Ruby tool by appending them after the image name:
 
 ```bash
-docker run --rm -v "$PWD/data:/data" umn-cookie-audit ruby umn_cookie_audit.rb --sites /data/sites.txt --output /data/report.csv --delay 6 --timeout 30 --no-verify-cookiecutter
+docker run --rm -v "$PWD/data:/data" umn-cookie-audit ruby umn_cookie_audit.rb --sites /data/sites.txt --output /data/report.csv --delay 6 --timeout 30 --no-verify-cookiecutter --separator newline --pool 4
 ```
 
-Options:
+### Options
 
 - `--sites` Path to the input list (default `/data/sites.txt`).
 - `--output` Path to the output CSV (default `/data/report.csv`).
 - `--delay` Seconds to wait after navigation to allow tags to set cookies (default `4`).
 - `--timeout` Navigation timeout in seconds (default `25`).
-- `--headful` Run with a visible browser window (useful for debugging; requires a host with a display).
 - `--no-verify-cookiecutter` Skip the post-visit CookieCutter page check.
+- `--separator NAME` Joiner for multi-value CSV cells: `newline` (default), `comma`, or `pipe`.
+- `--no-color` Disable ANSI colors in console output.
+- `--pool N` Number of parallel workers (default **4**). To run **single-threaded**, set `--pool 1`.
 
-## Notes & tips
+## Tips & troubleshooting
 
-- The container uses Chromium at `/usr/bin/chromium`. To override, set
-  `BROWSER_PATH` at build/runtime if needed.
+- **Publish your GA/GTM/Drupal changes.** Changes to `cookie_domain` and related
+  settings do **not** take effect until published in Google Tag Manager (and in
+  Drupal’s admin UI, if applicable). Bust caches (e.g., Varnish) afterward, then
+  re-run the scan.
 - Some sites set cookies only after interaction or deeper navigation. Increase
-  `--delay` or test interactively with `--headful`.
-- The `remediation` column suggests concrete next actions, typically updating
-  GA/gtag to set `cookie_domain` to the site’s exact hostname and removing
-  legacy UA tags that force `.umn.edu`.
+  `--delay` and test again if CookieCutter has different results than this scan.
+- For very large batches, increase `--pool` to use more CPU, but watch RAM/CPU
+  and external rate limits. Research shows that a pool of 6-8 may be better
+  performance than higher. Your mileage may vary depending on your
+  processor/core count.
